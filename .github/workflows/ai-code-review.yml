@@ -1,47 +1,192 @@
+###############################################################################
+# AI Code Review — Enterprise Edition
+#
+# Features:
+#   • Inline PR comments on exact lines (not a wall-of-text comment)
+#   • Project context via .ai-review/context.md (architecture, conventions)
+#   • File-type filtering (include/exclude patterns)
+#   • Handles large diffs — truncates gracefully
+#   • Skips draft PRs and bot PRs
+#   • Falls back to summary comment if inline comments fail
+#   • Configurable via .ai-review/config.yml
+#   • Concurrency control — cancels outdated runs on re-push
+#
+# Setup:
+#   1. Add ANTHROPIC_API_KEY to repository secrets
+#   2. (Optional) Create .ai-review/context.md with project conventions
+#   3. (Optional) Create .ai-review/config.yml to override defaults
+###############################################################################
+
 name: AI Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, ready_for_review]
 
 permissions:
   contents: read
   pull-requests: write
   issues: write
 
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   ai-review:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
+    if: |
+      github.event.pull_request.draft == false &&
+      !contains(github.event.pull_request.user.login, '[bot]')
     steps:
+      # ── Checkout ───────────────────────────────────────────────────────
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Get PR diff
-        id: diff
+      # ── Load config ────────────────────────────────────────────────────
+      - name: Load review config
+        id: config
+        run: |
+          set -euo pipefail
+
+          CONFIG_FILE=".ai-review/config.yml"
+
+          # Defaults
+          MODEL="claude-sonnet-4-20250514"
+          MAX_DIFF_SIZE="80000"
+          MAX_FILES="30"
+          LANGUAGE="English"
+          INCLUDE_PATTERNS=""
+          EXCLUDE_PATTERNS="package-lock.json,yarn.lock,*.lock,*.min.js,*.min.css,*.map,dist/**,build/**,vendor/**,node_modules/**,*.generated.*,*.snap,__snapshots__/**"
+
+          if [ -f "$CONFIG_FILE" ]; then
+            echo "Found config file: $CONFIG_FILE"
+
+            parse_yaml() {
+              local key="$1" default="$2"
+              grep -E "^${key}:" "$CONFIG_FILE" 2>/dev/null \
+                | sed "s/^${key}:[[:space:]]*//" | tr -d '"' || echo "$default"
+            }
+
+            MODEL=$(parse_yaml "model" "$MODEL")
+            MAX_DIFF_SIZE=$(parse_yaml "max_diff_size" "$MAX_DIFF_SIZE")
+            MAX_FILES=$(parse_yaml "max_files" "$MAX_FILES")
+            LANGUAGE=$(parse_yaml "language" "$LANGUAGE")
+            INCLUDE_PATTERNS=$(parse_yaml "include" "$INCLUDE_PATTERNS")
+            EXCLUDE_PATTERNS=$(parse_yaml "exclude" "$EXCLUDE_PATTERNS")
+          fi
+
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "max_diff_size=$MAX_DIFF_SIZE" >> "$GITHUB_OUTPUT"
+          echo "max_files=$MAX_FILES" >> "$GITHUB_OUTPUT"
+          echo "language=$LANGUAGE" >> "$GITHUB_OUTPUT"
+          echo "include=$INCLUDE_PATTERNS" >> "$GITHUB_OUTPUT"
+          echo "exclude=$EXCLUDE_PATTERNS" >> "$GITHUB_OUTPUT"
+
+      # ── Load project context ───────────────────────────────────────────
+      - name: Load project context
+        id: context
+        run: |
+          set -euo pipefail
+          DELIM="CTX_EOF_$(openssl rand -hex 16)"
+          echo "content<<${DELIM}" >> "$GITHUB_OUTPUT"
+
+          if [ -f ".ai-review/context.md" ]; then
+            cat ".ai-review/context.md" >> "$GITHUB_OUTPUT"
+          else
+            echo "No project context provided." >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "${DELIM}" >> "$GITHUB_OUTPUT"
+
+      # ── Collect changed files ──────────────────────────────────────────
+      - name: Get changed files
+        id: files
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          INCLUDE: ${{ steps.config.outputs.include }}
+          EXCLUDE: ${{ steps.config.outputs.exclude }}
+          MAX_FILES: ${{ steps.config.outputs.max_files }}
         run: |
           set -euo pipefail
-          PATTERN=(. ':!package-lock.json' ':!yarn.lock' ':!*.lock')
-          ORIGINAL_SIZE=$(git diff "${BASE_SHA}...${HEAD_SHA}" -- "${PATTERN[@]}" | wc -c | awk '{print $1}')
-          git diff "${BASE_SHA}...${HEAD_SHA}" -- "${PATTERN[@]}" | head -c 50000 > /tmp/pr_diff.txt
-          if [ "$ORIGINAL_SIZE" -gt 50000 ]; then
-            printf '\n\n_[Warning: diff truncated at 50000 bytes]_\n' >> /tmp/pr_diff.txt
-          fi
 
-      - name: Check diff
-        id: diff_check
-        run: |
-          if [ ! -s /tmp/pr_diff.txt ]; then
-            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+          git diff --name-only --diff-filter=AMR "${BASE_SHA}...${HEAD_SHA}" > /tmp/all_files.txt
+
+          # Apply include filter
+          if [ -n "$INCLUDE" ]; then
+            > /tmp/included_files.txt
+            IFS=',' read -ra PATTERNS <<< "$INCLUDE"
+            for pattern in "${PATTERNS[@]}"; do
+              pattern=$(echo "$pattern" | xargs)
+              REGEX=$(echo "$pattern" | sed 's/\*\*/.*/' | sed 's/\*/[^\/]*/')
+              grep -E "$REGEX" /tmp/all_files.txt >> /tmp/included_files.txt || true
+            done
+            sort -u /tmp/included_files.txt > /tmp/filtered_files.txt
           else
-            echo "has_diff=true" >> "$GITHUB_OUTPUT"
+            cp /tmp/all_files.txt /tmp/filtered_files.txt
           fi
 
+          # Apply exclude filter
+          if [ -n "$EXCLUDE" ]; then
+            IFS=',' read -ra PATTERNS <<< "$EXCLUDE"
+            for pattern in "${PATTERNS[@]}"; do
+              pattern=$(echo "$pattern" | xargs)
+              REGEX=$(echo "$pattern" | sed 's/\*\*/.*/' | sed 's/\*/[^\/]*/')
+              grep -vE "$REGEX" /tmp/filtered_files.txt > /tmp/temp_files.txt || true
+              mv /tmp/temp_files.txt /tmp/filtered_files.txt
+            done
+          fi
+
+          head -n "$MAX_FILES" /tmp/filtered_files.txt > /tmp/review_files.txt
+          TOTAL=$(wc -l < /tmp/filtered_files.txt | awk '{print $1}')
+          REVIEWING=$(wc -l < /tmp/review_files.txt | awk '{print $1}')
+
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "reviewing=$REVIEWING" >> "$GITHUB_OUTPUT"
+
+          if [ "$REVIEWING" -eq 0 ]; then
+            echo "has_files=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_files=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "📁 Files: $REVIEWING / $TOTAL will be reviewed"
+
+      # ── Build per-file diffs ───────────────────────────────────────────
+      - name: Build diffs
+        if: steps.files.outputs.has_files == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAX_DIFF_SIZE: ${{ steps.config.outputs.max_diff_size }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/diffs
+          TOTAL_SIZE=0
+
+          while IFS= read -r file; do
+            DIFF=$(git diff "${BASE_SHA}...${HEAD_SHA}" -- "$file" 2>/dev/null || true)
+            [ -z "$DIFF" ] && continue
+
+            FILE_SIZE=${#DIFF}
+            NEW_TOTAL=$((TOTAL_SIZE + FILE_SIZE))
+
+            if [ "$NEW_TOTAL" -gt "$MAX_DIFF_SIZE" ]; then
+              echo "⚠️ Stopping at $file — would exceed ${MAX_DIFF_SIZE} bytes"
+              break
+            fi
+
+            SAFE_NAME=$(echo "$file" | tr '/' '_')
+            echo "$DIFF" > "/tmp/diffs/${SAFE_NAME}.diff"
+            TOTAL_SIZE=$NEW_TOTAL
+          done < /tmp/review_files.txt
+
+          echo "📦 Total diff size: $TOTAL_SIZE bytes"
+
+      # ── PR metadata ────────────────────────────────────────────────────
       - name: Get PR info
         id: pr_info
         env:
@@ -60,56 +205,97 @@ jobs:
             echo "${BODY_DELIM}"
           } >> "$GITHUB_OUTPUT"
 
-      # Output language: change the "Write the entire review in …" rule if needed.
+      # ── Call Claude API ────────────────────────────────────────────────
       - name: Run Claude Code Review
         id: review
-        if: steps.diff_check.outputs.has_diff == 'true'
+        if: steps.files.outputs.has_files == 'true'
         timeout-minutes: 10
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ steps.config.outputs.model }}
+          LANGUAGE: ${{ steps.config.outputs.language }}
           PR_TITLE: ${{ steps.pr_info.outputs.title }}
           PR_BODY: ${{ steps.pr_info.outputs.body }}
-          REVIEW_PROMPT: |
-            You are a senior code reviewer. Review the following PR diff and provide actionable feedback.
-
-            Focus on:
-            1. Bugs and logical errors
-            2. Security vulnerabilities
-            3. Performance issues
-            4. Code style and best practices
-            5. Missing error handling
-            6. Potential edge cases
-
-            Rules:
-            - Be concise and specific
-            - Reference exact file names and line numbers
-            - Suggest fixes, not just problems
-            - If the code looks good, say so briefly
-            - Write the entire review in English (headings, explanations, and bullet points)
-            - Format as markdown
+          PROJECT_CONTEXT: ${{ steps.context.outputs.content }}
+          TOTAL_FILES: ${{ steps.files.outputs.total }}
+          REVIEWING_FILES: ${{ steps.files.outputs.reviewing }}
         run: |
           set -euo pipefail
+
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "::error::ANTHROPIC_API_KEY is not set. Add it in repository secrets."
+            echo "::error::ANTHROPIC_API_KEY is not set."
             exit 1
           fi
 
-          DIFF=$(cat /tmp/pr_diff.txt)
-          PROMPT="$REVIEW_PROMPT"
+          COMBINED_DIFF=""
+          for f in /tmp/diffs/*.diff; do
+            [ -f "$f" ] || continue
+            COMBINED_DIFF+="$(cat "$f")"$'\n\n'
+          done
+
+          SYSTEM_PROMPT=$(cat <<'PROMPT_END'
+          You are a principal-level code reviewer at a top tech company.
+          You review code with precision, depth, and empathy.
+          PROMPT_END
+          )
+
+          # Append project context and instructions dynamically
+          SYSTEM_PROMPT="${SYSTEM_PROMPT}
+
+## Project Context
+${PROJECT_CONTEXT}
+
+## Your Task
+Review the PR diff below. Produce TWO sections:
+
+### Section 1: INLINE COMMENTS
+Return a JSON array of inline comment objects:
+{
+  \"path\": \"src/foo/bar.ts\",
+  \"line\": 42,
+  \"side\": \"RIGHT\",
+  \"body\": \"Your comment in markdown\"
+}
+
+Rules for inline comments:
+- \"line\" must be a line number from the diff (+ side, new code only)
+- \"side\" is always \"RIGHT\"
+- Prefix each with severity: 🔴 (must fix), 🟡 (should fix), 🔵 (suggestion), 💡 (nitpick)
+- Suggest a fix with a code block when possible
+- Keep each comment 2-5 lines
+- Maximum 20 comments, prioritized by severity
+- If the same issue repeats, comment once and note \"same pattern in N other places\"
+- Do NOT comment on formatting/style a linter would catch
+
+Wrap in <inline_comments>[...]</inline_comments>
+
+### Section 2: SUMMARY
+Short markdown summary:
+- Overall assessment (1-2 sentences)
+- Key concerns (if any)
+- What was done well (if applicable)
+
+Wrap in <summary>...</summary>
+
+## Output language: ${LANGUAGE}
+If code is clean, return empty array [] and say so in summary."
 
           PAYLOAD=$(jq -n \
-            --arg model "claude-opus-4-6" \
-            --arg prompt "$PROMPT" \
+            --arg model "$MODEL" \
+            --arg system "$SYSTEM_PROMPT" \
             --arg title "$PR_TITLE" \
             --arg body "$PR_BODY" \
-            --arg diff "$DIFF" \
+            --arg reviewing "$REVIEWING_FILES" \
+            --arg total "$TOTAL_FILES" \
+            --arg diff "$COMBINED_DIFF" \
             '{
               model: $model,
               max_tokens: 4096,
+              system: $system,
               messages: [
                 {
                   role: "user",
-                  content: ($prompt + "\n\nPR Title: " + $title + "\n\nPR Description: " + $body + "\n\nDiff:\n```\n" + $diff + "\n```")
+                  content: ("PR Title: " + $title + "\n\nPR Description:\n" + $body + "\n\nFiles reviewed: " + $reviewing + " / " + $total + "\n\nDiff:\n```\n" + $diff + "\n```")
                 }
               ]
             }')
@@ -127,45 +313,96 @@ jobs:
             exit 1
           fi
 
-          if ! REVIEW=$(jq -re '.content[0].text' /tmp/api_resp.json 2>/tmp/jq_err.txt); then
-            echo "::error::Failed to parse API response as JSON or missing .content[0].text"
-            cat /tmp/jq_err.txt || true
-            cat /tmp/api_resp.json
-            exit 1
-          fi
-          echo "$REVIEW" > /tmp/review.txt
+          REVIEW=$(jq -re '.content[0].text' /tmp/api_resp.json)
+          echo "$REVIEW" > /tmp/review_raw.txt
 
-      - name: Post review comment
-        if: steps.diff_check.outputs.has_diff == 'true'
+          # Parse inline comments
+          sed -n '/<inline_comments>/,/<\/inline_comments>/p' /tmp/review_raw.txt \
+            | sed '1d;$d' > /tmp/inline_comments.json || echo "[]" > /tmp/inline_comments.json
+
+          if ! jq empty /tmp/inline_comments.json 2>/dev/null; then
+            echo "⚠️ Invalid JSON, falling back to empty"
+            echo "[]" > /tmp/inline_comments.json
+          fi
+
+          # Parse summary
+          sed -n '/<summary>/,/<\/summary>/p' /tmp/review_raw.txt \
+            | sed '1d;$d' > /tmp/summary.md || echo "No summary generated." > /tmp/summary.md
+
+          echo "💬 Inline comments: $(jq length /tmp/inline_comments.json)"
+
+      # ── Post review ────────────────────────────────────────────────────
+      - name: Post review
+        if: steps.files.outputs.has_files == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          REVIEW=$(cat /tmp/review.txt)
-          {
-            echo "## 🤖 AI Code Review"
-            echo ""
-            echo "$REVIEW"
-            echo ""
-            echo "---"
-            echo "*Automated review by Claude*"
-          } > /tmp/comment.md
 
-          EXISTING_COMMENT_ID=$(gh api \
+          SUMMARY=$(cat /tmp/summary.md)
+          COMMENT_COUNT=$(jq length /tmp/inline_comments.json)
+
+          REVIEW_BODY="## 🤖 AI Code Review"$'\n\n'"${SUMMARY}"$'\n\n'"---"$'\n'"*Automated review by Claude*"
+
+          # Try posting as a proper review with inline comments
+          if [ "$COMMENT_COUNT" -gt 0 ]; then
+            COMMENTS=$(jq -c '.' /tmp/inline_comments.json)
+
+            REVIEW_PAYLOAD=$(jq -n \
+              --arg sha "$HEAD_SHA" \
+              --arg body "$REVIEW_BODY" \
+              --argjson comments "$COMMENTS" \
+              '{
+                commit_id: $sha,
+                body: $body,
+                event: "COMMENT",
+                comments: $comments
+              }')
+
+            HTTP_CODE=$(curl -sS -o /tmp/review_resp.json -w "%{http_code}" \
+              -X POST \
+              "https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -d "$REVIEW_PAYLOAD")
+
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+              echo "✅ Review posted with $COMMENT_COUNT inline comments"
+              exit 0
+            fi
+
+            echo "⚠️ Inline review failed (HTTP $HTTP_CODE). Falling back to comment."
+            cat /tmp/review_resp.json
+          fi
+
+          # Fallback: post as a regular PR comment
+          {
+            echo "$REVIEW_BODY"
+            if [ "$COMMENT_COUNT" -gt 0 ]; then
+              echo ""
+              echo "### Inline Comments"
+              echo ""
+              jq -r '.[] | "**`\(.path):\(.line)`** — \(.body)\n"' /tmp/inline_comments.json
+            fi
+          } > /tmp/fallback_comment.md
+
+          # Update existing or create new
+          EXISTING=$(gh api \
             "repos/${REPO}/issues/${PR_NUMBER}/comments" \
             --paginate \
             --jq '.[] | select(.body != null and (.body | startswith("## 🤖 AI Code Review"))) | .id' \
-            | head -n1)
+            | head -n1 || true)
 
-          if [ -n "${EXISTING_COMMENT_ID:-}" ]; then
-            jq -n --rawfile body /tmp/comment.md '{body: $body}' | gh api \
+          if [ -n "${EXISTING:-}" ]; then
+            jq -n --rawfile body /tmp/fallback_comment.md '{body: $body}' | gh api \
               --method PATCH \
-              "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+              "repos/${REPO}/issues/comments/${EXISTING}" \
               --input -
           else
             gh pr comment "$PR_NUMBER" \
               --repo "$REPO" \
-              --body-file /tmp/comment.md
+              --body-file /tmp/fallback_comment.md
           fi
