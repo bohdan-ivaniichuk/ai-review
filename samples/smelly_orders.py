@@ -15,8 +15,6 @@ def proc(x, y, z, flag=True, items=[]):  # mutable default + vague names
         tot = tot + items[i] * 1.19  # magic number (VAT?) duplicated below
         if items[i] > 100:
             tot = tot - 5
-        if items[i] > 100:  # duplicate condition
-            tot = tot - 5
     if flag:
         tot = tot + x + y
     else:
