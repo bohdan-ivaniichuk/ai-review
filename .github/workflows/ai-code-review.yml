@@ -32,6 +32,7 @@ jobs:
           echo "${{ github.event.pull_request.body }}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
+      # Output language: change the "Write the entire review in …" rule (Ukrainian vs English, etc.).
       - name: Run Claude Code Review
         id: review
         env:
@@ -52,7 +53,7 @@ jobs:
             - Reference exact file names and line numbers
             - Suggest fixes, not just problems
             - If the code looks good, say so briefly
-            - Use Ukrainian language for comments
+            - Write the entire review in Ukrainian (headings, explanations, and bullet points)
             - Format as markdown
         run: |
           DIFF=$(cat /tmp/pr_diff.txt)
