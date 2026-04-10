@@ -240,45 +240,46 @@ jobs:
           )
 
           # Append project context and instructions dynamically
-          SYSTEM_PROMPT="${SYSTEM_PROMPT}
+          # Note: use $VAR in shell; braced shell vars can confuse the Actions YAML parser.
+          SYSTEM_PROMPT="$SYSTEM_PROMPT
 
-## Project Context
-${PROJECT_CONTEXT}
+          ## Project Context
+          $PROJECT_CONTEXT
 
-## Your Task
-Review the PR diff below. Produce TWO sections:
+          ## Your Task
+          Review the PR diff below. Produce TWO sections:
 
-### Section 1: INLINE COMMENTS
-Return a JSON array of inline comment objects:
-{
-  \"path\": \"src/foo/bar.ts\",
-  \"line\": 42,
-  \"side\": \"RIGHT\",
-  \"body\": \"Your comment in markdown\"
-}
+          ### Section 1: INLINE COMMENTS
+          Return a JSON array of inline comment objects:
+          {
+            \"path\": \"src/foo/bar.ts\",
+            \"line\": 42,
+            \"side\": \"RIGHT\",
+            \"body\": \"Your comment in markdown\"
+          }
 
-Rules for inline comments:
-- \"line\" must be a line number from the diff (+ side, new code only)
-- \"side\" is always \"RIGHT\"
-- Prefix each with severity: 🔴 (must fix), 🟡 (should fix), 🔵 (suggestion), 💡 (nitpick)
-- Suggest a fix with a code block when possible
-- Keep each comment 2-5 lines
-- Maximum 20 comments, prioritized by severity
-- If the same issue repeats, comment once and note \"same pattern in N other places\"
-- Do NOT comment on formatting/style a linter would catch
+          Rules for inline comments:
+          - \"line\" must be a line number from the diff (+ side, new code only)
+          - \"side\" is always \"RIGHT\"
+          - Prefix each with severity: 🔴 (must fix), 🟡 (should fix), 🔵 (suggestion), 💡 (nitpick)
+          - Suggest a fix with a code block when possible
+          - Keep each comment 2-5 lines
+          - Maximum 20 comments, prioritized by severity
+          - If the same issue repeats, comment once and note \"same pattern in N other places\"
+          - Do NOT comment on formatting/style a linter would catch
 
-Wrap in <inline_comments>[...]</inline_comments>
+          Wrap in <inline_comments>[...]</inline_comments>
 
-### Section 2: SUMMARY
-Short markdown summary:
-- Overall assessment (1-2 sentences)
-- Key concerns (if any)
-- What was done well (if applicable)
+          ### Section 2: SUMMARY
+          Short markdown summary:
+          - Overall assessment (1-2 sentences)
+          - Key concerns (if any)
+          - What was done well (if applicable)
 
-Wrap in <summary>...</summary>
+          Wrap in <summary>...</summary>
 
-## Output language: ${LANGUAGE}
-If code is clean, return empty array [] and say so in summary."
+          ## Output language: $LANGUAGE
+          If code is clean, return empty array [] and say so in summary."
 
           PAYLOAD=$(jq -n \
             --arg model "$MODEL" \
@@ -345,7 +346,7 @@ If code is clean, return empty array [] and say so in summary."
           SUMMARY=$(cat /tmp/summary.md)
           COMMENT_COUNT=$(jq length /tmp/inline_comments.json)
 
-          REVIEW_BODY="## 🤖 AI Code Review"$'\n\n'"${SUMMARY}"$'\n\n'"---"$'\n'"*Automated review by Claude*"
+          REVIEW_BODY="## 🤖 AI Code Review"$'\n\n'"$SUMMARY"$'\n\n'"---"$'\n'"*Automated review by Claude*"
 
           # Try posting as a proper review with inline comments
           if [ "$COMMENT_COUNT" -gt 0 ]; then
