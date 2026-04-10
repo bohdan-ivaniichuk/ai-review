@@ -17,7 +17,7 @@ reviews:
 
   # Less noise in the walkthrough; focus on review content.
   poem: false
-  fortune: false
+  in_progress_fortune: false
 
   path_instructions:
     - path: "**/*.py"
@@ -33,7 +33,7 @@ reviews:
 
   auto_review:
     enabled: true
-    incremental: true
+    auto_incremental_review: true
     drafts: false
     base_branches:
       - "main"
