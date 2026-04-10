@@ -11,6 +11,7 @@ permissions:
 jobs:
   ai-review:
     runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,21 +21,34 @@ jobs:
       - name: Get PR diff
         id: diff
         run: |
-          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- . ':!package-lock.json' ':!yarn.lock' ':!*.lock')
-          # Save diff to file to avoid shell escaping issues
+          set -euo pipefail
+          DIFF=$(git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- . ':!package-lock.json' ':!yarn.lock' ':!*.lock' | head -c 50000)
           echo "$DIFF" > /tmp/pr_diff.txt
+          if [ "$(wc -c < /tmp/pr_diff.txt)" -eq 50000 ]; then
+            printf '\n\n_[Warning: diff truncated at 50000 bytes]_\n' >> /tmp/pr_diff.txt
+          fi
+
+      - name: Check diff
+        id: diff_check
+        run: |
+          if [ ! -s /tmp/pr_diff.txt ]; then
+            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_diff=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Get PR info
         id: pr_info
         run: |
-          echo "title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo "${{ github.event.pull_request.body }}" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          echo "${{ github.event.pull_request.body || 'No description provided' }}" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       # Output language: change the "Write the entire review in …" rule (Ukrainian vs English, etc.).
       - name: Run Claude Code Review
         id: review
+        if: steps.diff_check.outputs.has_diff == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           REVIEW_PROMPT: |
@@ -56,14 +70,19 @@ jobs:
             - Write the entire review in Ukrainian (headings, explanations, and bullet points)
             - Format as markdown
         run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is not set. Add it in repository secrets."
+            exit 1
+          fi
+
           DIFF=$(cat /tmp/pr_diff.txt)
           PR_TITLE="${{ steps.pr_info.outputs.title }}"
           PR_BODY="${{ steps.pr_info.outputs.body }}"
           PROMPT="$REVIEW_PROMPT"
 
-          # Build JSON payload safely using jq
           PAYLOAD=$(jq -n \
-            --arg model "claude-sonnet-4-20250514" \
+            --arg model "claude-3-5-sonnet-20241022" \
             --arg prompt "$PROMPT" \
             --arg title "$PR_TITLE" \
             --arg body "$PR_BODY" \
@@ -79,28 +98,37 @@ jobs:
               ]
             }')
 
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          HTTP_CODE=$(curl -sS --max-time 120 -o /tmp/api_resp.json -w "%{http_code}" \
+            https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -d "$PAYLOAD")
 
-          # Extract review text
-          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "Error: Could not get review"')
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Anthropic API returned HTTP $HTTP_CODE"
+            cat /tmp/api_resp.json
+            exit 1
+          fi
 
-          # Save to file
+          REVIEW=$(jq -r '.content[0].text // "Error: Could not get review"' /tmp/api_resp.json)
           echo "$REVIEW" > /tmp/review.txt
 
       - name: Post review comment
+        if: steps.diff_check.outputs.has_diff == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           REVIEW=$(cat /tmp/review.txt)
+          {
+            echo "## 🤖 AI Code Review"
+            echo ""
+            echo "$REVIEW"
+            echo ""
+            echo "---"
+            echo "*Automated review by Claude*"
+          } > /tmp/comment.md
           gh pr comment ${{ github.event.pull_request.number }} \
             --repo ${{ github.repository }} \
-            --body "## 🤖 AI Code Review
-
-          $REVIEW
-
-          ---
-          *Automated review by Claude*"
+            --body-file /tmp/comment.md
