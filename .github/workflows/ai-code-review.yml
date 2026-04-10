@@ -1,0 +1,105 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- . ':!package-lock.json' ':!yarn.lock' ':!*.lock')
+          # Save diff to file to avoid shell escaping issues
+          echo "$DIFF" > /tmp/pr_diff.txt
+
+      - name: Get PR info
+        id: pr_info
+        run: |
+          echo "title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "${{ github.event.pull_request.body }}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Run Claude Code Review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REVIEW_PROMPT: |
+            You are a senior code reviewer. Review the following PR diff and provide actionable feedback.
+
+            Focus on:
+            1. Bugs and logical errors
+            2. Security vulnerabilities
+            3. Performance issues
+            4. Code style and best practices
+            5. Missing error handling
+            6. Potential edge cases
+
+            Rules:
+            - Be concise and specific
+            - Reference exact file names and line numbers
+            - Suggest fixes, not just problems
+            - If the code looks good, say so briefly
+            - Use Ukrainian language for comments
+            - Format as markdown
+        run: |
+          DIFF=$(cat /tmp/pr_diff.txt)
+          PR_TITLE="${{ steps.pr_info.outputs.title }}"
+          PR_BODY="${{ steps.pr_info.outputs.body }}"
+          PROMPT="$REVIEW_PROMPT"
+
+          # Build JSON payload safely using jq
+          PAYLOAD=$(jq -n \
+            --arg model "claude-sonnet-4-20250514" \
+            --arg prompt "$PROMPT" \
+            --arg title "$PR_TITLE" \
+            --arg body "$PR_BODY" \
+            --arg diff "$DIFF" \
+            '{
+              model: $model,
+              max_tokens: 4096,
+              messages: [
+                {
+                  role: "user",
+                  content: ($prompt + "\n\nPR Title: " + $title + "\n\nPR Description: " + $body + "\n\nDiff:\n```\n" + $diff + "\n```")
+                }
+              ]
+            }')
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$PAYLOAD")
+
+          # Extract review text
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "Error: Could not get review"')
+
+          # Save to file
+          echo "$REVIEW" > /tmp/review.txt
+
+      - name: Post review comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REVIEW=$(cat /tmp/review.txt)
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body "## 🤖 AI Code Review
+
+          $REVIEW
+
+          ---
+          *Automated review by Claude*"
