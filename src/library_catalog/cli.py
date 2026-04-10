@@ -63,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     p_books = sub.add_parser("books", help=f"List or add books. {_STATELESS}")
     p_books_sub = p_books.add_subparsers(dest="books_cmd", required=True)
     p_books_sub.add_parser("list", help="List all books")
+    p_books_search = p_books_sub.add_parser("search", help="Search by title or author substring")
+    p_books_search.add_argument("--query", required=True, help="Case-insensitive substring")
     p_books_add = p_books_sub.add_parser("add", help="Add a book")
     p_books_add.add_argument("--title", required=True)
     p_books_add.add_argument("--author", required=True)
@@ -97,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "books" and args.books_cmd == "list":
             for b in catalog.list_books():
+                print(
+                    f"{b.id}\t{b.title}\t{b.author}\t{b.isbn}\t"
+                    f"available {b.copies_available}/{b.copies_total}"
+                )
+            return 0
+        if args.cmd == "books" and args.books_cmd == "search":
+            for b in catalog.search_books(args.query):
                 print(
                     f"{b.id}\t{b.title}\t{b.author}\t{b.isbn}\t"
                     f"available {b.copies_available}/{b.copies_total}"
@@ -142,4 +151,4 @@ def main(argv: list[str] | None = None) -> int:
     except LibraryError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    return 1
+    raise AssertionError(f"unhandled CLI branch: {args.cmd!r}")

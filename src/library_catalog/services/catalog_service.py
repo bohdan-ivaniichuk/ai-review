@@ -54,6 +54,18 @@ class CatalogService:
     def list_books(self) -> List[Book]:
         return sorted(self._repo.all_books(), key=lambda b: (b.title.lower(), b.author.lower()))
 
+    def search_books(self, query: str) -> List[Book]:
+        """Return books whose title or author contains the query (case-insensitive)."""
+        q = query.strip().lower()
+        if not q:
+            return self.list_books()
+        matches = [
+            b
+            for b in self._repo.all_books()
+            if q in b.title.lower() or q in b.author.lower()
+        ]
+        return sorted(matches, key=lambda b: (b.title.lower(), b.author.lower()))
+
 
 def _normalize_isbn(raw: str) -> str:
     return "".join(ch for ch in raw.strip() if ch.isdigit() or ch.upper() == "X")
