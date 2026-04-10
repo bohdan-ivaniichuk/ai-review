@@ -45,30 +45,39 @@ def _run_demo() -> int:
     return 0
 
 
+_STATELESS = (
+    "State is only in memory and is not saved between process runs; "
+    "use `demo` for a full flow, or wire persistence yourself."
+)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="library-catalog", description="In-memory library management")
+    parser = argparse.ArgumentParser(
+        prog="library-catalog",
+        description=f"In-memory library management. {_STATELESS}",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("demo", help="Run a one-shot in-memory demo (no persistence)")
 
-    p_books = sub.add_parser("books", help="List or add books")
+    p_books = sub.add_parser("books", help=f"List or add books. {_STATELESS}")
     p_books_sub = p_books.add_subparsers(dest="books_cmd", required=True)
-    p_books_list = p_books_sub.add_parser("list", help="List all books")
+    p_books_sub.add_parser("list", help="List all books")
     p_books_add = p_books_sub.add_parser("add", help="Add a book")
     p_books_add.add_argument("--title", required=True)
     p_books_add.add_argument("--author", required=True)
     p_books_add.add_argument("--isbn", required=True)
     p_books_add.add_argument("--copies", type=int, default=1)
 
-    p_mem = sub.add_parser("members", help="Register or list members")
+    p_mem = sub.add_parser("members", help=f"Register or list members. {_STATELESS}")
     p_mem_sub = p_mem.add_subparsers(dest="mem_cmd", required=True)
-    p_mem_list = p_mem_sub.add_parser("list", help="List members")
+    p_mem_sub.add_parser("list", help="List members")
     p_mem_reg = p_mem_sub.add_parser("register", help="Register a member")
     p_mem_reg.add_argument("--name", required=True)
     p_mem_reg.add_argument("--email", required=True)
     p_mem_reg.add_argument("--max-loans", type=int, default=5)
 
-    p_loans = sub.add_parser("loans", help="Checkout, return, or list overdue")
+    p_loans = sub.add_parser("loans", help=f"Checkout, return, or list overdue. {_STATELESS}")
     p_loans_sub = p_loans.add_subparsers(dest="loans_cmd", required=True)
     p_co = p_loans_sub.add_parser("checkout", help="Borrow a book")
     p_co.add_argument("--book-id", type=UUID, required=True)

@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
 
-def _utcnow() -> datetime:
-    return datetime.now(tz=None)
+def utc_now() -> datetime:
+    """Timezone-aware current instant in UTC."""
+    return datetime.now(tz=timezone.utc)
+
+
+def utc_today() -> date:
+    """Current calendar date in UTC (matches due_date derived from UTC borrow time)."""
+    return utc_now().date()
 
 
 @dataclass(frozen=True)
@@ -63,7 +69,7 @@ class Loan:
     def is_overdue(self) -> bool:
         if not self.is_active:
             return False
-        return date.today() > self.due_date
+        return utc_today() > self.due_date
 
 
 def new_book_id() -> UUID:
@@ -79,4 +85,8 @@ def new_loan_id() -> UUID:
 
 
 def default_borrowed_at() -> datetime:
-    return _utcnow()
+    return utc_now()
+
+
+def default_returned_at() -> datetime:
+    return utc_now()

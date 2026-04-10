@@ -27,6 +27,8 @@ class CatalogService:
         isbn = _normalize_isbn(isbn)
         if not title or not author or not isbn:
             raise ValidationError("title, author, and isbn are required")
+        if len(isbn) not in (10, 13):
+            raise ValidationError("ISBN must be 10 or 13 characters (after normalizing digits/X)")
         if copies < 1:
             raise ValidationError("copies must be at least 1")
         if self._repo.books_by_isbn(isbn):

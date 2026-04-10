@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import timedelta
 from typing import List
 from uuid import UUID
 
 from library_catalog.exceptions import NotFoundError, ValidationError
-from library_catalog.models import Book, Loan, default_borrowed_at, new_loan_id
+from library_catalog.models import Book, Loan, default_borrowed_at, default_returned_at, new_loan_id
 from library_catalog.repository import LibraryRepository
 
 
@@ -56,15 +57,7 @@ class LendingService:
         )
         self._repo.save_loan(loan)
 
-        updated = Book(
-            id=book.id,
-            title=book.title,
-            author=book.author,
-            isbn=book.isbn,
-            copies_total=book.copies_total,
-            copies_available=book.copies_available - 1,
-        )
-        self._repo.replace_book(updated)
+        self._repo.replace_book(replace(book, copies_available=book.copies_available - 1))
         return loan
 
     def return_book(self, *, loan_id: UUID) -> Loan:
@@ -84,19 +77,16 @@ class LendingService:
             member_id=loan.member_id,
             borrowed_at=loan.borrowed_at,
             due_date=loan.due_date,
-            returned_at=datetime.now(),
+            returned_at=default_returned_at(),
         )
         self._repo.save_loan(returned)
 
-        updated = Book(
-            id=book.id,
-            title=book.title,
-            author=book.author,
-            isbn=book.isbn,
-            copies_total=book.copies_total,
-            copies_available=min(book.copies_total, book.copies_available + 1),
+        self._repo.replace_book(
+            replace(
+                book,
+                copies_available=min(book.copies_total, book.copies_available + 1),
+            )
         )
-        self._repo.replace_book(updated)
         return returned
 
     def overdue_loans(self) -> List[Loan]:

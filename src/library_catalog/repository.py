@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
 from library_catalog.models import Book, Loan, Member
@@ -26,8 +26,8 @@ class LibraryRepository:
     def books_by_isbn(self, isbn: str) -> List[Book]:
         return [b for b in self._books.values() if b.isbn == isbn]
 
-    def all_books(self) -> Iterable[Book]:
-        return self._books.values()
+    def all_books(self) -> List[Book]:
+        return list(self._books.values())
 
     def replace_book(self, book: Book) -> None:
         self._books[book.id] = book
@@ -46,8 +46,8 @@ class LibraryRepository:
                 return m
         return None
 
-    def all_members(self) -> Iterable[Member]:
-        return self._members.values()
+    def all_members(self) -> List[Member]:
+        return list(self._members.values())
 
     # Loans
     def save_loan(self, loan: Loan) -> None:
