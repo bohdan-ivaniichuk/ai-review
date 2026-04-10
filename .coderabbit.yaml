@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Docs: https://docs.coderabbit.ai/reference/configuration
+
+language: "en-US"
+
+# Beta features; disable if anything feels unstable.
+early_access: true
+
+reviews:
+  # Strongest built-in strictness for AI feedback (more comments; can feel nitpicky).
+  profile: "assertive"
+
+  # Shows ignored paths, suppressed comments, extra context — useful when tuning rules.
+  review_details: true
+
+  high_level_summary: true
+
+  # Less noise in the walkthrough; focus on review content.
+  poem: false
+  fortune: false
+
+  path_instructions:
+    - path: "**/*.py"
+      instructions: |
+        Be strict. Prioritize correctness, security (secrets, injection, unsafe deserialization),
+        error handling and edge cases, clear APIs, typing, and performance on hot paths.
+        Call out dead code, unused imports/variables, magic numbers without context, vague names,
+        and missing or weak tests when behavior changes.
+    - path: "samples/**"
+      instructions: |
+        Treat sample/experimental code like production unless the file explicitly says otherwise:
+        flag smells, misleading names, and missing tests.
+
+  auto_review:
+    enabled: true
+    incremental: true
+    drafts: false
+    base_branches:
+      - "main"
+      - "dev"
+
+  tools:
+    # Python: linters add deterministic signal on top of the AI review.
+    ruff:
+      enabled: true
+    pylint:
+      enabled: true
+    # Security-oriented pattern rules (good complement to AI).
+    semgrep:
+      enabled: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "**/README.md"
+      - "**/AGENTS.md"
+      - "**/.cursor/rules/**"
+
+chat:
+  auto_reply: true
