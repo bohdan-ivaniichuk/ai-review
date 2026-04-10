@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
   ai-review:
@@ -20,11 +21,15 @@ jobs:
 
       - name: Get PR diff
         id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          DIFF=$(git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} -- . ':!package-lock.json' ':!yarn.lock' ':!*.lock' | head -c 50000)
-          echo "$DIFF" > /tmp/pr_diff.txt
-          if [ "$(wc -c < /tmp/pr_diff.txt)" -eq 50000 ]; then
+          PATTERN=(. ':!package-lock.json' ':!yarn.lock' ':!*.lock')
+          ORIGINAL_SIZE=$(git diff "${BASE_SHA}...${HEAD_SHA}" -- "${PATTERN[@]}" | wc -c | awk '{print $1}')
+          git diff "${BASE_SHA}...${HEAD_SHA}" -- "${PATTERN[@]}" | head -c 50000 > /tmp/pr_diff.txt
+          if [ "$ORIGINAL_SIZE" -gt 50000 ]; then
             printf '\n\n_[Warning: diff truncated at 50000 bytes]_\n' >> /tmp/pr_diff.txt
           fi
 
@@ -39,18 +44,31 @@ jobs:
 
       - name: Get PR info
         id: pr_info
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body || '' }}
         run: |
-          echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
-          echo "body<<EOF" >> "$GITHUB_OUTPUT"
-          echo "${{ github.event.pull_request.body || 'No description provided' }}" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          TITLE_DELIM="TITLE_EOF_$(openssl rand -hex 16)"
+          BODY_DELIM="BODY_EOF_$(openssl rand -hex 16)"
+          {
+            echo "title<<${TITLE_DELIM}"
+            echo "$PR_TITLE"
+            echo "${TITLE_DELIM}"
+            echo "body<<${BODY_DELIM}"
+            echo "${PR_BODY:-No description provided}"
+            echo "${BODY_DELIM}"
+          } >> "$GITHUB_OUTPUT"
 
       # Output language: change the "Write the entire review in …" rule (Ukrainian vs English, etc.).
       - name: Run Claude Code Review
         id: review
         if: steps.diff_check.outputs.has_diff == 'true'
+        timeout-minutes: 10
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_TITLE: ${{ steps.pr_info.outputs.title }}
+          PR_BODY: ${{ steps.pr_info.outputs.body }}
           REVIEW_PROMPT: |
             You are a senior code reviewer. Review the following PR diff and provide actionable feedback.
 
@@ -77,12 +95,10 @@ jobs:
           fi
 
           DIFF=$(cat /tmp/pr_diff.txt)
-          PR_TITLE="${{ steps.pr_info.outputs.title }}"
-          PR_BODY="${{ steps.pr_info.outputs.body }}"
           PROMPT="$REVIEW_PROMPT"
 
           PAYLOAD=$(jq -n \
-            --arg model "claude-sonnet-4-6" \
+            --arg model "claude-opus-4-6" \
             --arg prompt "$PROMPT" \
             --arg title "$PR_TITLE" \
             --arg body "$PR_BODY" \
@@ -111,13 +127,20 @@ jobs:
             exit 1
           fi
 
-          REVIEW=$(jq -r '.content[0].text // "Error: Could not get review"' /tmp/api_resp.json)
+          if ! REVIEW=$(jq -re '.content[0].text' /tmp/api_resp.json 2>/tmp/jq_err.txt); then
+            echo "::error::Failed to parse API response as JSON or missing .content[0].text"
+            cat /tmp/jq_err.txt || true
+            cat /tmp/api_resp.json
+            exit 1
+          fi
           echo "$REVIEW" > /tmp/review.txt
 
       - name: Post review comment
         if: steps.diff_check.outputs.has_diff == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           REVIEW=$(cat /tmp/review.txt)
@@ -129,6 +152,20 @@ jobs:
             echo "---"
             echo "*Automated review by Claude*"
           } > /tmp/comment.md
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --repo ${{ github.repository }} \
-            --body-file /tmp/comment.md
+
+          EXISTING_COMMENT_ID=$(gh api \
+            "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --paginate \
+            --jq '.[] | select(.body != null and (.body | startswith("## 🤖 AI Code Review"))) | .id' \
+            | head -n1)
+
+          if [ -n "${EXISTING_COMMENT_ID:-}" ]; then
+            jq -n --rawfile body /tmp/comment.md '{body: $body}' | gh api \
+              --method PATCH \
+              "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+              --input -
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$REPO" \
+              --body-file /tmp/comment.md
+          fi
