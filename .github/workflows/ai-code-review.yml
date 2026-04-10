@@ -1,0 +1,171 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          PATTERN=(. ':!package-lock.json' ':!yarn.lock' ':!*.lock')
+          ORIGINAL_SIZE=$(git diff "${BASE_SHA}...${HEAD_SHA}" -- "${PATTERN[@]}" | wc -c | awk '{print $1}')
+          git diff "${BASE_SHA}...${HEAD_SHA}" -- "${PATTERN[@]}" | head -c 50000 > /tmp/pr_diff.txt
+          if [ "$ORIGINAL_SIZE" -gt 50000 ]; then
+            printf '\n\n_[Warning: diff truncated at 50000 bytes]_\n' >> /tmp/pr_diff.txt
+          fi
+
+      - name: Check diff
+        id: diff_check
+        run: |
+          if [ ! -s /tmp/pr_diff.txt ]; then
+            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_diff=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get PR info
+        id: pr_info
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body || '' }}
+        run: |
+          set -euo pipefail
+          TITLE_DELIM="TITLE_EOF_$(openssl rand -hex 16)"
+          BODY_DELIM="BODY_EOF_$(openssl rand -hex 16)"
+          {
+            echo "title<<${TITLE_DELIM}"
+            echo "$PR_TITLE"
+            echo "${TITLE_DELIM}"
+            echo "body<<${BODY_DELIM}"
+            echo "${PR_BODY:-No description provided}"
+            echo "${BODY_DELIM}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Output language: change the "Write the entire review in …" rule if needed.
+      - name: Run Claude Code Review
+        id: review
+        if: steps.diff_check.outputs.has_diff == 'true'
+        timeout-minutes: 10
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_TITLE: ${{ steps.pr_info.outputs.title }}
+          PR_BODY: ${{ steps.pr_info.outputs.body }}
+          REVIEW_PROMPT: |
+            You are a senior code reviewer. Review the following PR diff and provide actionable feedback.
+
+            Focus on:
+            1. Bugs and logical errors
+            2. Security vulnerabilities
+            3. Performance issues
+            4. Code style and best practices
+            5. Missing error handling
+            6. Potential edge cases
+
+            Rules:
+            - Be concise and specific
+            - Reference exact file names and line numbers
+            - Suggest fixes, not just problems
+            - If the code looks good, say so briefly
+            - Write the entire review in English (headings, explanations, and bullet points)
+            - Format as markdown
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is not set. Add it in repository secrets."
+            exit 1
+          fi
+
+          DIFF=$(cat /tmp/pr_diff.txt)
+          PROMPT="$REVIEW_PROMPT"
+
+          PAYLOAD=$(jq -n \
+            --arg model "claude-opus-4-6" \
+            --arg prompt "$PROMPT" \
+            --arg title "$PR_TITLE" \
+            --arg body "$PR_BODY" \
+            --arg diff "$DIFF" \
+            '{
+              model: $model,
+              max_tokens: 4096,
+              messages: [
+                {
+                  role: "user",
+                  content: ($prompt + "\n\nPR Title: " + $title + "\n\nPR Description: " + $body + "\n\nDiff:\n```\n" + $diff + "\n```")
+                }
+              ]
+            }')
+
+          HTTP_CODE=$(curl -sS --max-time 120 -o /tmp/api_resp.json -w "%{http_code}" \
+            https://api.anthropic.com/v1/messages \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$PAYLOAD")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Anthropic API returned HTTP $HTTP_CODE"
+            cat /tmp/api_resp.json
+            exit 1
+          fi
+
+          if ! REVIEW=$(jq -re '.content[0].text' /tmp/api_resp.json 2>/tmp/jq_err.txt); then
+            echo "::error::Failed to parse API response as JSON or missing .content[0].text"
+            cat /tmp/jq_err.txt || true
+            cat /tmp/api_resp.json
+            exit 1
+          fi
+          echo "$REVIEW" > /tmp/review.txt
+
+      - name: Post review comment
+        if: steps.diff_check.outputs.has_diff == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          REVIEW=$(cat /tmp/review.txt)
+          {
+            echo "## 🤖 AI Code Review"
+            echo ""
+            echo "$REVIEW"
+            echo ""
+            echo "---"
+            echo "*Automated review by Claude*"
+          } > /tmp/comment.md
+
+          EXISTING_COMMENT_ID=$(gh api \
+            "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --paginate \
+            --jq '.[] | select(.body != null and (.body | startswith("## 🤖 AI Code Review"))) | .id' \
+            | head -n1)
+
+          if [ -n "${EXISTING_COMMENT_ID:-}" ]; then
+            jq -n --rawfile body /tmp/comment.md '{body: $body}' | gh api \
+              --method PATCH \
+              "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+              --input -
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$REPO" \
+              --body-file /tmp/comment.md
+          fi
