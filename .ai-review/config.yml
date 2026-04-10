@@ -1,0 +1,23 @@
+# .ai-review/config.yml
+# ─────────────────────────────────────────────
+# All fields are optional — defaults are sane.
+# ─────────────────────────────────────────────
+
+# Claude model to use
+model: claude-sonnet-4-20250514
+
+# Max total diff size in bytes (larger PRs get truncated)
+max_diff_size: 80000
+
+# Max files to review per PR
+max_files: 30
+
+# Language for review comments
+language: English
+
+# Only review these file patterns (comma-separated, empty = all)
+# Example: *.ts,*.tsx,*.py,*.go
+include: ""
+
+# Skip these patterns (comma-separated)
+exclude: "package-lock.json,yarn.lock,*.lock,*.min.js,*.min.css,*.map,dist/**,build/**,vendor/**,node_modules/**,*.generated.*,*.snap,__snapshots__/**,*.svg,*.png,*.jpg"
