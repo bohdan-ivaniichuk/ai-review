@@ -82,7 +82,7 @@ jobs:
           PROMPT="$REVIEW_PROMPT"
 
           PAYLOAD=$(jq -n \
-            --arg model "claude-3-5-sonnet-20241022" \
+            --arg model "claude-sonnet-4-6" \
             --arg prompt "$PROMPT" \
             --arg title "$PR_TITLE" \
             --arg body "$PR_BODY" \
