@@ -60,7 +60,7 @@ jobs:
             echo "${BODY_DELIM}"
           } >> "$GITHUB_OUTPUT"
 
-      # Output language: change the "Write the entire review in …" rule (Ukrainian vs English, etc.).
+      # Output language: change the "Write the entire review in …" rule if needed.
       - name: Run Claude Code Review
         id: review
         if: steps.diff_check.outputs.has_diff == 'true'
@@ -85,7 +85,7 @@ jobs:
             - Reference exact file names and line numbers
             - Suggest fixes, not just problems
             - If the code looks good, say so briefly
-            - Write the entire review in Ukrainian (headings, explanations, and bullet points)
+            - Write the entire review in English (headings, explanations, and bullet points)
             - Format as markdown
         run: |
           set -euo pipefail
